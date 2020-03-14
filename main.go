@@ -2,32 +2,125 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"net/http"
+	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
+	"open/backend/gateway"
+	"open/backend/gateway/mqtt"
+	"open/config"
+	"open/downlink"
 	"open/service"
-	"github.com/gin-gonic/gin"
+	"open/uplink"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
 	fmt.Println("start")
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	router := gin.Default()
-	router.POST("/", func(c *gin.Context) {
-		fmt.Println("POST", "/")
-		c.String(http.StatusOK, "Hello World test2.go,/")
-	})
-	router.GET("/", func(c *gin.Context) {
-		fmt.Println("POST", "/")
-		c.String(http.StatusOK, "Hello World test2.go,/")
-	})
-	router.POST("/test",  service.ServiceAll )
-	router.GET("/test", func(c *gin.Context) {
-		fmt.Println("POST", "test")
-		c.String(http.StatusOK, "Hello World test2.go,/test")
-	})
-	router.GET("/oath/redirect", func(c *gin.Context) {
-		fmt.Println("GET", "/oath/redirect")
-		c.String(http.StatusOK, "Hello World test2.go,/test")
-	})
-	router.Run(":8000")
+
+	var server = new(uplink.Server)
+	var baiDuSer = new( service.BaiduAPI)
+	tasks := []func() error{
+		setLogLevel,
+		setGatewayBackend,
+		setupUplink,
+		setupDownlink,
+		startBaiDuService(baiDuSer),
+		startLoRaServer(server),
+	}
+
+	for _, t := range tasks {
+		if err := t(); err != nil {
+			log.Fatal(err)
+		}
+	}
+	sigChan := make(chan os.Signal)
+	exitChan := make(chan struct{})
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	log.WithField("signal", <-sigChan).Info("signal received")
+	go func() {
+		log.Warning("stopping chirpstack-network-server")
+		if err := server.Stop(); err != nil {
+			log.Fatal(err)
+		}
+		//if err := gwStats.Stop(); err != nil {
+		//	log.Fatal(err)
+		//}
+		exitChan <- struct{}{}
+	}()
+	//两种结束程序的方式
+	select {
+	case <-exitChan:
+	case s := <-sigChan:
+		log.WithField("signal", s).Info("signal received, stopping immediately")
+	}
+
 }
+func setLogLevel() error {
+	level,_ := log.ParseLevel(config.C.General.LogLevel)
+	log.SetLevel(level)
+	//log.SetReportCaller(true)
+	return nil
+}
+
+func setupUplink() error {
+	if err := uplink.Setup(config.C); err != nil {
+		return errors.Wrap(err, "setup link error")
+	}
+	return nil
+}
+func setupDownlink() error {
+
+	if err := downlink.Setup(config.C); err != nil {
+		return errors.Wrap(err, "setup setupBaiDuService error")
+	}
+	return nil
+
+}
+func startBaiDuService(baiDuSer *service.BaiduAPI) func() error {
+	return func() error {
+		baiDuSer = service.NewServer(config.C)
+		return  baiDuSer.Start()
+	}
+}
+func startLoRaServer(server *uplink.Server) func() error {
+	return func() error {
+		*server = *uplink.NewServer()
+		return server.Start()
+	}
+}
+func setGatewayBackend() error {
+	var err error
+	var gw gateway.Gateway
+	//log.Info("[ldm]Backend.Type = ",config.C.NetworkServer.Gateway.Backend.Type)
+	switch config.C.General.Type {
+	case "mqtt":
+		gw, err = mqtt.NewBackend( // 最终赋值给一个接口对象
+			config.C,
+		)
+	case "amqp":
+		//gw, err = amqp.NewBackend(config.C)
+		log.Info("[setGatewayBackend] amqp unsupport protocol")
+	case "gcp_pub_sub":
+		//gw, err = gcppubsub.NewBackend(config.C)
+		log.Info("[setGatewayBackend] gcp_pub_sub unsupport protocol")
+	case "azure_iot_hub":
+		//gw, err = azureiothub.NewBackend(config.C)
+		log.Info("[setGatewayBackend] azure_iot_hub unsupport protocol")
+	default:
+		return fmt.Errorf("unexpected gateway backend type: %s", config.C.General.Type)
+	}
+
+	if err != nil {
+		return errors.Wrap(err, "gateway-backend setup failed")
+	}
+
+	gateway.SetBackend(gw) // 将网关对象赋值给网关接口。因为网关可以是mqtt协议的，也可以是其他协议上传来的
+	return nil
+}
+
+//func startQueueScheduler() error {
+//	log.Info("starting downlink device-queue scheduler")
+//	go downlink.DeviceQueueSchedulerLoop()
+//	return nil
+//}
