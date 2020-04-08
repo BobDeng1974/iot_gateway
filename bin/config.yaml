@@ -16,9 +16,14 @@ mqtt:
   server: tcp://39.100.117.189:1883
   cleanSession: true
   eventTopic: gateway/+/event/+
-  commandTopicTemplate: gateway/{{ .DevAddr }}/command/{{ .CommandType }}
+  commandTopicTemplate: gateway/{{ .DevName }}/{{ .DevId }}/command/{{ .CommandType }}
   qos: 0
   username: ldm
   password: "123456"
   maxReconnectInterval: 1
   clientID: clould
+  maxHandleGoroutine: 100
+
+consul:
+  server: 127.0.0.1:8500
+

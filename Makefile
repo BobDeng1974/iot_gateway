@@ -31,7 +31,7 @@ $(info VERSION: $(VERSION))
 $(info )
 
 output:
-	$(ENV) go build $(LDFLAGS)  -o $(OUTPUT_DIR)/$(PROJECT_NAME)
+	go generate && $(ENV) go build $(LDFLAGS)  -o $(OUTPUT_DIR)/$(PROJECT_NAME)
 clean:
 	rm -f $(OUTPUT_DIR)/$(PROJECT_NAME)*
 

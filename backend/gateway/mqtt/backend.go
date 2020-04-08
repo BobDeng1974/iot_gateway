@@ -2,20 +2,28 @@ package mqtt
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"github.com/brocaar/lorawan"
 	paho "github.com/eclipse/paho.mqtt.golang"
+	consulapi "github.com/hashicorp/consul/api"
+	"google.golang.org/grpc"
 	"open/backend/gateway"
 	pb "open/backend/proto"
 	"open/config"
+	"open/consul"
 	"open/helpers"
+	"open/lib/grpc_service"
+	"open/lib/grpc_service/parser_proto"
 	"open/marshaler"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/panjf2000/ants"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
@@ -26,14 +34,21 @@ const (
 	marshalerProtobuf
 	marshalerJSON
 )
+type Frame struct {
+	DeviceType string
+	Msg paho.Message
+}
+
+
 
 // Backend implements a MQTT pub-sub backend.
 type Backend struct {
 	sync.RWMutex
 
 	wg sync.WaitGroup
+	HandlePool              *ants.PoolWithFunc
 
-	rxPacketChan      chan pb.UplinkFrame //上行有管道，下行不需要管道
+	rxPacketChan      chan *pb.UplinkFrame //上行有管道，下行不需要管道
 	//statsPacketChan   chan gw.GatewayStats
 	//downlinkTXAckChan chan gw.DownlinkTXAck
 
@@ -52,7 +67,7 @@ func NewBackend( c config.Config) (gateway.Gateway, error) {
 	var err error
 
 	b := Backend{
-		rxPacketChan:      make(chan pb.UplinkFrame), // 无缓冲，意味着，并发量高的时候，将无法接收新的帧
+		rxPacketChan:      make(chan *pb.UplinkFrame), // 无缓冲，意味着，并发量高的时候，将无法接收新的帧
 		//statsPacketChan:   make(chan gw.GatewayStats),
 		//downlinkTXAckChan: make(chan gw.DownlinkTXAck),
 		//gatewayMarshaler:  make(map[lorawan.EUI64]marshaler.Type),
@@ -65,6 +80,11 @@ func NewBackend( c config.Config) (gateway.Gateway, error) {
 		return nil, errors.Wrap(err, "gateway/mqtt: parse command topic template error")
 	}
 
+	b.HandlePool ,_ = ants.NewPoolWithFunc(conf.MaxHandleGoroutine, func(i interface{}) {
+		//.MessageCheck(i)
+		b.FrameUnpack(i)
+	})
+
 	opts := paho.NewClientOptions()
 	opts.AddBroker(conf.Server) //在root.go中
 	opts.SetUsername(conf.Username)
@@ -75,17 +95,6 @@ func NewBackend( c config.Config) (gateway.Gateway, error) {
 	opts.SetConnectionLostHandler(b.onConnectionLost)
 	opts.SetMaxReconnectInterval(time.Duration(conf.MaxReconnectInterval)*time.Second)
 
-	//tlsconfig, err := newTLSConfig(conf.CACert, conf.TLSCert, conf.TLSKey)
-	//if err != nil {
-	//	log.WithError(err).WithFields(log.Fields{
-	//		"ca_cert":  conf.CACert,
-	//		"tls_cert": conf.TLSCert,
-	//		"tls_key":  conf.TLSKey,
-	//	}).Fatal("gateway/mqtt: error loading mqtt certificate files")
-	//}
-	//if tlsconfig != nil {
-	//	opts.SetTLSConfig(tlsconfig)
-	//}
 
 	log.WithField("server", conf.Server).Info("gateway/mqtt: connecting to mqtt broker")
 	b.conn = paho.NewClient(opts)
@@ -115,6 +124,7 @@ func (b *Backend) Close() error {
 
 	log.Info("backend/gateway: handling last messages")
 	b.wg.Wait()
+	b.HandlePool.Release()
 	close(b.rxPacketChan)
 	//close(b.statsPacketChan)
 	//close(b.downlinkTXAckChan)
@@ -123,7 +133,7 @@ func (b *Backend) Close() error {
 
 // RXPacketChan returns the uplink-frame channel.
 // uplink.go 调用这个函数来获取 数据接收管道
-func (b *Backend) RXPacketChan() chan pb.UplinkFrame {
+func (b *Backend) RXPacketChan() chan *pb.UplinkFrame {
 	return b.rxPacketChan
 }
 
@@ -147,9 +157,11 @@ func (b *Backend) SendTXPacket(txPacket pb.DownlinkFrame) error {
 	downID := helpers.GetDownlinkID(&txPacket)
 	//downID是上下文uuid，当初的GatewayID当做，DevAddr
 	log.Debug("[SendTXPacket]downID=",downID)
+
+	//TODO:这里应该去掉devName和devID，这里是网络通信不是lora通信
 	return b.publishCommand(log.Fields{
 		"downlink_id": downID,
-	}, txPacket.DevAddr,"down", &txPacket)
+	}, txPacket.DevName,txPacket.DevId,"down", &txPacket)
 }
 
 // SendGatewayConfigPacket sends the given GatewayConfigPacket to the gateway.
@@ -160,23 +172,24 @@ func (b *Backend) SendTXPacket(txPacket pb.DownlinkFrame) error {
 //}
 // 下行命令. devAddr当做GatewayID
 // command 是这里用做命令类型，即up 、 down
-func (b *Backend) publishCommand(fields log.Fields, devAddr []byte, command string, msg proto.Message) error {
+func (b *Backend) publishCommand(fields log.Fields, DevName string, DevId string, command string, msg proto.Message) error {
 	//t := b.getGatewayMarshaler(gatewayID) //根据上行的格式
 	bb, err := marshaler.MarshalCommand(marshaler.Protobuf, msg)
 	if err != nil {
 		return errors.Wrap(err, "gateway/mqtt: marshal gateway command error")
 	}
-
+	//TODO:DevAddr和设备类型应该再做一下区分。这里暂时写死SER_NAME 作为topic
 	templateCtx := struct {
-		DevAddr   string
+		DevName   string
+		DevId string
 		CommandType string
-	}{string(devAddr), command}
-	topic := bytes.NewBuffer(nil) //把上面两个参数按照模板格式写入到topic这个buffer中。"gateway/{{ .DevAddr }}/command/{{ .CommandType }}"
+	}{DevName, DevId,command}
+	topic := bytes.NewBuffer(nil) //把上面两个参数按照模板格式写入到topic这个buffer中。"gateway/{{ .DevType }}/{{ .DevId }}/command/{{ .CommandType }}"
 	if err := b.commandTopicTemplate.Execute(topic, templateCtx); err != nil {
 		return errors.Wrap(err, "execute command topic template error")
 	}
 
-	fields["devAddr"] = devAddr
+	fields["DevId"] = DevId
 	fields["command"] = command
 	fields["qos"] = b.qos
 	fields["topic"] = topic.String() // 下行的topic
@@ -217,14 +230,27 @@ func (b *Backend) rxPacketHandler(c paho.Client, msg paho.Message) {
 	b.wg.Add(1)
 	defer b.wg.Done()
 
-	var uplinkFrame pb.UplinkFrame
-	_, err := marshaler.UnmarshalUplinkFrame(msg.Payload(), &uplinkFrame)
-	if err != nil {
-		log.Debugf("mqtt payload hex= %02x,str=%s\n",msg.Payload(),string(msg.Payload()))
-		log.WithFields(log.Fields{
-		}).WithError(err).Error("gateway/mqtt: unmarshal uplink frame error")
+	// 建立一个协成池，然后并发rpc请求相应的设备驱动来处理。根据topic区分不同的设备
+	// topic 格式暂时定为，设备上行： up/deviceType/deviceAddr/xxxx
+	topic := strings.Split( msg.Topic(), "/")
+	if len(topic ) < 3 {
+		log.Warn("[prxPacketHandler]get a error topic.",msg.Topic())
 		return
 	}
+	frame := Frame {
+		DeviceType:topic[1],
+		Msg:msg,
+	}
+	_=b.HandlePool.Invoke(&frame)
+
+	//var uplinkFrame pb.UplinkFrame
+	//_, err := marshaler.UnmarshalUplinkFrame(msg.Payload(), &uplinkFrame)
+	//if err != nil {
+	//	log.Debugf("mqtt payload hex= %02x,str=%s\n",msg.Payload(),string(msg.Payload()))
+	//	log.WithFields(log.Fields{
+	//	}).WithError(err).Error("gateway/mqtt: unmarshal uplink frame error")
+	//	return
+	//}
 
 	//if uplinkFrame.TxInfo == nil {
 	//	log.WithFields(log.Fields{
@@ -233,40 +259,89 @@ func (b *Backend) rxPacketHandler(c paho.Client, msg paho.Message) {
 	//	return
 	//}
 
-	//if uplinkFrame.RxInfo == nil {
-	//	log.WithFields(log.Fields{
-	//		"data_base64": base64.StdEncoding.EncodeToString(msg.Payload()),
-	//	}).Error("gateway/mqtt: rx_info must not be nil")
-	//	return
-	//}
 
-	//gatewayID := helpers.GetGatewayID(uplinkFrame) // 这个是devaddr
-	//b.setGatewayMarshaler(gatewayID, t) // 记录上行帧格式序列化格式，然后下行的时候，采用一样的格式
-	//uplinkID := helpers.GetUplinkID(uplinkFrame.RxInfo)
-
-	log.WithFields(log.Fields{
-		"uplink_id": uplinkFrame.UplinkId ,
-		"DevAddr":uplinkFrame.DevAddr ,
-	}).Info("gateway/mqtt: uplink frame received")
-
-	// Since with MQTT all subscribers will receive the uplink messages sent
-	// by all the gateways, the first instance receiving the message must lock it,
-	// so that other instances can ignore the same message (from the same gw).
-	// 第一个基站接收到此帧后，其他基站就要忽律掉此帧。
-	//锁定方式通过redis
+	//log.WithFields(log.Fields{
+	//	"uplink_id": uplinkFrame.UplinkId ,
+	//	"DevAddr":uplinkFrame.DevAddr ,
+	//}).Info("gateway/mqtt: uplink frame received")
 	//
-	//key := fmt.Sprintf("lora:ns:uplink:lock:%s:%d:%d:%d:%s", gatewayID, uplinkFrame.TxInfo.Frequency, uplinkFrame.RxInfo.Board, uplinkFrame.RxInfo.Antenna, hex.EncodeToString(uplinkFrame.PhyPayload))
-	//if locked, err := b.isLocked(key); err != nil || locked {
-	//	if err != nil {
-	//		log.WithError(err).WithFields(log.Fields{
-	//			"uplink_id": uplinkID,
-	//			"key":       key,
-	//		}).Error("gateway/mqtt: acquire lock error")
-	//	}
-	//	return
-	//}
 
+	//b.rxPacketChan <- uplinkFrame //写入接收管道，不会重复的消息。这个管道无缓冲，阻塞
+}
+
+
+func (b *Backend)FrameUnpack(frame interface{}){
+	MsgInfo :=frame.(*Frame)
+	// DeviceType 和 注册服务的id应该一一对应
+		log.Debug("type=",MsgInfo.DeviceType )
+		var uplinkFrame pb.UplinkFrame
+		_, err := marshaler.UnmarshalUplinkFrame(MsgInfo.Msg.Payload(), &uplinkFrame)
+		if err != nil {
+			log.Debugf("mqtt payload hex= %02x,str=%s\n",MsgInfo.Msg.Payload(),string(MsgInfo.Msg.Payload()))
+			log.WithFields(log.Fields{
+			}).WithError(err).Error("gateway/mqtt: unmarshal uplink frame error")
+			return
+		}
+		r := upParserService(MsgInfo.DeviceType,uplinkFrame.DevName,uplinkFrame.PhyPayload)
+		if r == nil {
+			log.Debug("[FrameUnpack]upParserService result is nil")
+			return
+		}
+		log.Debug("respond: ",r.ServiceName,r.Payload)
+		uplinkFrame.PhyPayload = r.Payload
+		b.sendResult(&uplinkFrame)
+	return
+
+
+}
+func (b *Backend) sendResult(uplinkFrame *pb.UplinkFrame){
 	b.rxPacketChan <- uplinkFrame //写入接收管道，不会重复的消息。这个管道无缓冲，阻塞
+}
+
+// serviceName 就是帧结构中的 DevName
+func upParserService(serviceID string,serviceName string,data []byte ) *grpc_service.Result{
+
+	if ser , ok := consul.ServiceMap.Load(serviceID); ok {
+
+		log.Debug("serviceName",serviceName )
+		service := ser.(*consulapi.AgentService)
+		log.Debug("service type",service.ID,)
+		// 发起rpc请求,设置超时时间，注意server端也要检查是否超时了
+		ctx, cancel := context.WithTimeout(context.TODO(), time.Second*1)
+		defer cancel()
+		conn, err := grpc.DialContext(ctx,service.Address+":"+ strconv.Itoa(service.Port) , grpc.WithInsecure())
+		if err != nil {
+			log.Warn("network error: ", err)
+			return nil
+		}
+		defer conn.Close()
+		start := time.Now().UnixNano()
+		c := parser.NewParserClient(conn)
+		ctx1, cancel1:= context.WithTimeout(context.TODO(), time.Second*1)
+		defer cancel1()
+		resp, err :=c.UnMarshal(ctx1,&parser.UpReq{
+			ID:"uuidxxx",
+			Name:serviceName,
+			Payload:data,
+		})
+		if err != nil {
+			log.Info("[upParserService]call Marshal error,",err)
+			return nil
+		}
+		end := time.Now().UnixNano()
+		elapsedTime := time.Duration(end - start)
+		if resp.Err != ""{
+			log.Info("[DownParserService]Marshal return error",resp.Err)
+			return nil
+		}
+		return &grpc_service.Result{
+			ID:resp.ID,
+			Elapse:elapsedTime,
+			Payload:resp.Payload,
+		}
+
+	}
+	return nil
 }
 //
 //func (b *Backend) statsPacketHandler(c paho.Client, msg paho.Message) {

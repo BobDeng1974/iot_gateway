@@ -1,3 +1,8 @@
+//go:generate echo generate parser.proto
+//go:generate protoc -I ./lib/grpc_service/parser_proto --go_out=plugins=grpc:./lib/grpc_service/parser_proto ./lib/grpc_service/parser_proto/parser.proto
+//go:generate echo generate gateway.proto
+//go:generate protoc -I ./backend/proto --go_out=plugins=grpc:./backend/proto ./backend/proto/gateway.proto
+
 package main
 
 import (
@@ -7,6 +12,7 @@ import (
 	"open/backend/gateway"
 	"open/backend/gateway/mqtt"
 	"open/config"
+	"open/consul"
 	"open/downlink"
 	"open/service"
 	"open/uplink"
@@ -25,6 +31,7 @@ func main() {
 		setGatewayBackend,
 		setupUplink,
 		setupDownlink,
+		setupServicefind,
 		startBaiDuService(baiDuSer),
 		startLoRaServer(server),
 	}
@@ -56,6 +63,7 @@ func main() {
 	}
 
 }
+
 func setLogLevel() error {
 	level,_ := log.ParseLevel(config.C.General.LogLevel)
 	log.SetLevel(level)
@@ -89,6 +97,12 @@ func startLoRaServer(server *uplink.Server) func() error {
 		return server.Start()
 	}
 }
+func setupServicefind() error {
+	if err := consul.Setup(config.C);err != nil {
+		return errors.Wrap(err, "setupServicefind error")
+	}
+	return nil
+}
 func setGatewayBackend() error {
 	var err error
 	var gw gateway.Gateway
@@ -118,6 +132,7 @@ func setGatewayBackend() error {
 	gateway.SetBackend(gw) // 将网关对象赋值给网关接口。因为网关可以是mqtt协议的，也可以是其他协议上传来的
 	return nil
 }
+
 
 //func startQueueScheduler() error {
 //	log.Info("starting downlink device-queue scheduler")

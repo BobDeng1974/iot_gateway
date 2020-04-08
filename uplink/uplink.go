@@ -13,8 +13,8 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
-	pb "open/backend/proto"
 	"open/backend/gateway"
+	pb "open/backend/proto"
 	"open/logging"
 )
 
@@ -71,7 +71,7 @@ func (s *Server) Stop() error {
 // in a separate go-routine. Errors are logged.
 func HandleUplinkFrames(wg *sync.WaitGroup) {
 	for uplinkFrame := range gateway.Backend().RXPacketChan() { //遍历这个管道。可是这个管道是无缓冲阻塞的。
-		go func(uplinkFrame pb.UplinkFrame) { //每接收到一条上行消息，就开一个协成去处理
+		go func(uplinkFrame *pb.UplinkFrame) { //每接收到一条上行消息，就开一个协成去处理
 			wg.Add(1) //控制并发数量，来自更上一层的
 			defer wg.Done()
 			// The ctxID will be available as context value "ctx_id" so that
@@ -95,7 +95,7 @@ func HandleUplinkFrames(wg *sync.WaitGroup) {
 }
 
 // HandleUplinkFrame handles a single uplink frame.
-func HandleUplinkFrame(ctx context.Context, uplinkFrame pb.UplinkFrame) error {
+func HandleUplinkFrame(ctx context.Context, uplinkFrame *pb.UplinkFrame) error {
 
 	switch uplinkFrame.FrameType { // 开始解析应用层payload数据
 	case gateway.UnconfirmedDataUp,gateway.ConfirmedDataUp:

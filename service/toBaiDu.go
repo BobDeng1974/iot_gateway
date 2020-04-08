@@ -4,28 +4,43 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	consulapi "github.com/hashicorp/consul/api"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"open/backend/gateway"
 	"open/config"
+	"open/consul"
 	"open/downlink"
-	"open/helpers"
+	"open/lib/grpc_service"
+	"open/lib/grpc_service/parser_proto"
 	"open/uplink/data"
+
+	"context"
+	log "github.com/sirupsen/logrus"
+	pb "open/backend/proto"
 	"strconv"
 	"time"
-	"context"
-	pb "open/backend/proto"
-	"github.com/golang/protobuf/proto"
-	log "github.com/sirupsen/logrus"
-
 )
 
 const(
 	BAIDU_TURN_OFF = "TurnOffRequest"
 	BAIDU_TURN_ON = "TurnOnRequest"
+	SER_NAME = "smartLamp"
+	SER_ID = "smartLamp"
+	DEV_ID = "EID0001"
 
+)
+// 尽量让应用层传输都是前端发来的明文数据。有明文转为最终传递给终端的格式，在解析器中完成。
+const (
+	TYPE_CMD = "cmd"
+	CMD_LAMP = "lamp"
+	CMD_ON = "on"
+	CMD_OFF = "off"
+	TYPE_CONFIG = "config"
+	CONFIG_VOLUME = "VOLUME"
 )
 type attr struct {
 	Name                      string `json:"name"`
@@ -174,11 +189,12 @@ func findHandle(c *gin.Context,find *reqBody) {
 
 func controlHandle (c *gin.Context,req *reqBody) {
 	var resp ControlRespond
-	var cmd pb.Operation
+	var cmd string
+	//var reqData []byte
 	if req.Header.Name == BAIDU_TURN_ON {
-		cmd =  pb.Operation_ON
+		cmd = CMD_ON
 	}else if req.Header.Name == BAIDU_TURN_OFF {
-		cmd = pb.Operation_OFF
+		cmd = CMD_OFF
 	}else {
 		resp.Header.Namespace = "DuerOS.ConnectedHome.Control"
 		resp.Header.Name = "UnsupportedTargetError"
@@ -190,28 +206,39 @@ func controlHandle (c *gin.Context,req *reqBody) {
 		c.JSON(http.StatusOK, resp)
 		return
 	}
-	downMsg := &pb.Payload{
-		Kind:uint32(pb.Category_CMD) ,
-		Key:uint32(pb.Device_LAMP),
-		Val:[]byte{uint8(cmd)},
+	sendData := make(map[string]interface{})
+	sendData["kind"] = TYPE_CMD;
+	sendData["field"] = CMD_LAMP;
+	sendData["val"] = cmd
+	reqData , err :=  json.Marshal(sendData)
+	if err != nil{
+		log.Debug("[controlHandle] marshal error",err)
 	}
-	pData, err := proto.Marshal(downMsg)
-	if err != nil {
-		log.Debug("[Marshal]proto Marshal error")
-		panic(err)
-	}
-
-	aes_data,err :=helpers.Encrypt(pData)
-	if err != nil {
-		log.Debug("[Marshal]Encrypt error")
-		panic(err)
-	}
-	log.Debugf("origin data 0x %02X",pData)
+	r := DownParserService(SER_NAME,reqData)
+	aes_data := r.Payload
+	//downMsg := &pb.Payload{
+	//	Kind:uint32(pb.Category_CMD) ,
+	//	Key:uint32(pb.Device_LAMP),
+	//	Val:[]byte{uint8(cmd)},
+	//}
+	//pData, err := proto.Marshal(downMsg)
+	//if err != nil {
+	//	log.Debug("[Marshal]proto Marshal error")
+	//	panic(err)
+	//}
+	////
+	//aes_data,err :=helpers.Encrypt(pData)
+	//if err != nil {
+	//	log.Debug("[Marshal]Encrypt error")
+	//	panic(err)
+	//}
+	//log.Debugf("origin data 0x %02X",pData)
 	log.Debugf("after aes data, 0x%02X",aes_data)
 
 	command := pb.DownlinkFrame{
 		FrameType:gateway.ConfirmedDataDown,
-		DevAddr:[]byte{0x30,0x31,0x32,0x33},
+		DevName:SER_ID,
+		DevId:DEV_ID,
 		FrameNum:1,
 		Port:2,
 		DownlinkId: uint32(rand.New(rand.NewSource(time.Now().UnixNano())).Int31n(10000-1000)+1000),
@@ -219,7 +246,7 @@ func controlHandle (c *gin.Context,req *reqBody) {
 
 	}
 	downlink.AddDownlinkFrame(command)
-	ch := make(chan pb.UplinkFrame,1)
+	ch := make(chan *pb.UplinkFrame,1)
 	data.DownlinkTaskCache.SetDefault(strconv.Itoa(int(command.DownlinkId)),ch)
 	log.Debug("wait up -------------")
 	upFrame := <- ch
@@ -231,38 +258,44 @@ func controlHandle (c *gin.Context,req *reqBody) {
 	//log.Debug("downID=",command.DownlinkId,",upID",upFrame.UplinkId)
 	//log.Debugf("befor Decrypt upFrame PhyPayload = 0x%02x",upFrame.PhyPayload)
 	//log.Debugf("befor Decrypt upFrame PhyPayload = ",string(upFrame.PhyPayload))
-
-	payDecrypt,err := helpers.Decrypt(upFrame.PhyPayload)
+	//r = UpParserService(SER_NAME,upFrame.PhyPayload)
+	upData :=  make(map[string]interface{})
+	err = json.Unmarshal(upFrame.PhyPayload,&upData)
 	if err != nil {
-		log.Error("[controlHandle]Decrypt error")
+		log.Debug("up data unmarshal error。",err)
 		panic(err)
-	}
-	upData :=  &pb.Payload{}
-	err = proto.Unmarshal(payDecrypt, upData)
-	if err != nil {
-		log.Error("[controlHandle] proto Unmarshal error")
-		panic(err)
+		return
 	}
 
-	if upData.Kind != uint32(pb.Category_CMD)  || upData.Key != uint32(pb.Device_LAMP){
-		log.Errorf("[controlHandle] uplink's kind or key conflict。kind=%d,key=%d\n",upData.Kind,upData.Key)
-		panic(err)
-	}
-	log.Debugf("upData val = 0x %02X",upData.Val)
+	//payDecrypt,err := helpers.Decrypt(upFrame.PhyPayload)
+	//if err != nil {
+	//	log.Error("[controlHandle]Decrypt error")
+	//	panic(err)
+	//}
+	//upData :=  &pb.Payload{}
+	//err = proto.Unmarshal(payDecrypt, upData)
+	//if err != nil {
+	//	log.Error("[controlHandle] proto Unmarshal error")
+	//	panic(err)
+	//}
 
-	if len(upData.Val) >0 &&  upData.Val[0] == downMsg.Val[0] {
+	if upData["kind"] != sendData["kind"]  || upData["field"] != sendData["field"]{
+		log.Panicf("[controlHandle] uplink's kind or field conflict。kind=%v,%v,filed=%v,%v\r\n",
+			upData["kind"],sendData["kind"],upData["field"],sendData["field"])
+
+	}
+	log.Debugf("upData val = %v,%v",upData["val"], sendData["val"])
+
+	if  upData["val"] ==  sendData["val"]{
 		// 执行成功。
-
 		resp.Header.Namespace = "DuerOS.ConnectedHome.Control"
 		resp.Header.Name = "TurnOnConfirmation"
 		resp.Header.MessageID = req.Header.MessageID
 		resp.Header.PayloadVersion = req.Header.PayloadVersion
 		resp.Payload.Attributes= []interface{}{}
 		log.Debug("[controlHandle]command success")
-
 	}else {
 		//执行失败
-
 		resp.Header.Namespace = "DuerOS.ConnectedHome.Control"
 		resp.Header.Name = "UnableToSetValueError"
 		resp.Header.MessageID = req.Header.MessageID
@@ -276,6 +309,52 @@ func controlHandle (c *gin.Context,req *reqBody) {
 	c.JSON(http.StatusOK, resp)
 	return
 }
+func DownParserService(serviceName string,data []byte ) *grpc_service.Result{
+
+	if ser , ok := consul.ServiceMap.Load(SER_ID); ok {
+
+		log.Debug("serviceName=",serviceName )
+		service := ser.(*consulapi.AgentService)
+		log.Debug("service type=",service.ID,)
+		// 发起rpc请求,设置超时时间，注意server端也要检查是否超时了
+		ctx, cancel := context.WithTimeout(context.TODO(), time.Second*1)
+		defer cancel()
+		conn, err := grpc.DialContext(ctx,service.Address+":"+strconv.Itoa(service.Port), grpc.WithInsecure())
+		if err != nil {
+			log.Warn("network error: ", err)
+			return nil
+		}
+		defer conn.Close()
+		start := time.Now().UnixNano()
+		c := parser.NewParserClient(conn)
+		ctx1, cancel1:= context.WithTimeout(context.TODO(), time.Second*1)
+		defer cancel1()
+		resp, err :=c.Marshal(ctx1,&parser.DownReq{
+			ID:"uuidXXX", // 本次请求id号
+			Name:serviceName,
+			Payload:data,
+		})
+		if err != nil {
+			log.Info("[DownParserService]call Marshal error,",err)
+			return nil
+		}
+		end := time.Now().UnixNano()
+		elapsedTime := time.Duration(end - start)
+		if resp.Err != ""{
+			log.Info("[DownParserService]Marshal return error",resp.Err)
+			return nil
+		}
+		return &grpc_service.Result{
+			ID:resp.ID,
+			Elapse:elapsedTime,
+			Payload:resp.Payload,
+		}
+
+	}
+	return nil
+
+}
+
 func ServiceAll(c *gin.Context){
 	//header, _ := json.Marshal(c.Request.Header)
 	input, _ := ioutil.ReadAll(c.Request.Body)

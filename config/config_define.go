@@ -7,8 +7,13 @@ type Config struct {
 	Mysql   Mysql   `yaml:"mysql"`
 	Mqtt    Mqtt    `yaml:"mqtt"`
 	General General `yaml:"general"`
-}
+	Consul MyConsul `yaml:"consul"`
 
+}
+type MyConsul struct {
+	Server               string `yaml:"server"`
+
+}
 // Mysql
 type Mysql struct {
 	User     string `yaml:"user"`
@@ -29,6 +34,8 @@ type Mqtt struct {
 	CleanSession         bool   `yaml:"cleanSession"`
 	Username             string `yaml:"username"`
 	MaxReconnectInterval int    `yaml:"maxReconnectInterval"`
+	MaxHandleGoroutine int    `yaml:"maxHandleGoroutine"`
+
 }
 
 // General
