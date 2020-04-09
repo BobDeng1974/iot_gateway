@@ -206,16 +206,14 @@ func controlHandle (c *gin.Context,req *reqBody) {
 		c.JSON(http.StatusOK, resp)
 		return
 	}
-	sendData := make(map[string]interface{})
-	sendData["kind"] = TYPE_CMD;
-	sendData["field"] = CMD_LAMP;
-	sendData["val"] = cmd
-	reqData , err :=  json.Marshal(sendData)
-	if err != nil{
-		log.Debug("[controlHandle] marshal error",err)
+	sendData := &parser.DownReq{
+		Kind:TYPE_CMD,
+		Field:CMD_LAMP,
+		Val:cmd,
 	}
-	r := DownParserService(SER_NAME,reqData)
-	aes_data := r.Payload
+
+	r := downParserService(sendData)
+	rsp := r.Data.(*parser.DownRsp)
 	//downMsg := &pb.Payload{
 	//	Kind:uint32(pb.Category_CMD) ,
 	//	Key:uint32(pb.Device_LAMP),
@@ -233,7 +231,7 @@ func controlHandle (c *gin.Context,req *reqBody) {
 	//	panic(err)
 	//}
 	//log.Debugf("origin data 0x %02X",pData)
-	log.Debugf("after aes data, 0x%02X",aes_data)
+	log.Debugf("after aes data, 0x%02X",rsp.Payload)
 
 	command := pb.DownlinkFrame{
 		FrameType:gateway.ConfirmedDataDown,
@@ -242,7 +240,7 @@ func controlHandle (c *gin.Context,req *reqBody) {
 		FrameNum:1,
 		Port:2,
 		DownlinkId: uint32(rand.New(rand.NewSource(time.Now().UnixNano())).Int31n(10000-1000)+1000),
-		PhyPayload:aes_data,
+		PhyPayload:rsp.Payload,
 
 	}
 	downlink.AddDownlinkFrame(command)
@@ -255,17 +253,19 @@ func controlHandle (c *gin.Context,req *reqBody) {
 			zap.Uint32("DownlinkId",upFrame.UplinkId))
 		panic("UplinkId != DownlinkId")
 	}
+	ret := upParserService(upFrame.DevId ,upFrame.DevName,upFrame.PhyPayload)
+	if ret == nil {
+		log.Debug("[FrameUnpack]upParserService result is nil")
+		return
+	}
+	upData :=ret.Data.(*parser.UpRsp)
+	log.Debug("respond: ",upData.Name,upData.ID,upData.Kind)
+
 	//log.Debug("downID=",command.DownlinkId,",upID",upFrame.UplinkId)
 	//log.Debugf("befor Decrypt upFrame PhyPayload = 0x%02x",upFrame.PhyPayload)
 	//log.Debugf("befor Decrypt upFrame PhyPayload = ",string(upFrame.PhyPayload))
 	//r = UpParserService(SER_NAME,upFrame.PhyPayload)
-	upData :=  make(map[string]interface{})
-	err = json.Unmarshal(upFrame.PhyPayload,&upData)
-	if err != nil {
-		log.Debug("up data unmarshal error。",err)
-		panic(err)
-		return
-	}
+
 
 	//payDecrypt,err := helpers.Decrypt(upFrame.PhyPayload)
 	//if err != nil {
@@ -279,14 +279,14 @@ func controlHandle (c *gin.Context,req *reqBody) {
 	//	panic(err)
 	//}
 
-	if upData["kind"] != sendData["kind"]  || upData["field"] != sendData["field"]{
+	if upData.Kind != sendData.Kind  || upData.Field != sendData.Field{
 		log.Panicf("[controlHandle] uplink's kind or field conflict。kind=%v,%v,filed=%v,%v\r\n",
-			upData["kind"],sendData["kind"],upData["field"],sendData["field"])
+			upData.Kind,sendData.Kind,upData.Field,sendData.Field)
 
 	}
-	log.Debugf("upData val = %v,%v",upData["val"], sendData["val"])
+	log.Debugf("upData val = %v,%v",upData.Val, sendData.Val)
 
-	if  upData["val"] ==  sendData["val"]{
+	if  upData.Val ==  sendData.Val{
 		// 执行成功。
 		resp.Header.Namespace = "DuerOS.ConnectedHome.Control"
 		resp.Header.Name = "TurnOnConfirmation"
@@ -309,11 +309,11 @@ func controlHandle (c *gin.Context,req *reqBody) {
 	c.JSON(http.StatusOK, resp)
 	return
 }
-func DownParserService(serviceName string,data []byte ) *grpc_service.Result{
+func downParserService(data *parser.DownReq ) *grpc_service.Result{
 
 	if ser , ok := consul.ServiceMap.Load(SER_ID); ok {
 
-		log.Debug("serviceName=",serviceName )
+		log.Debug("serviceName=",data.Name )
 		service := ser.(*consulapi.AgentService)
 		log.Debug("service type=",service.ID,)
 		// 发起rpc请求,设置超时时间，注意server端也要检查是否超时了
@@ -329,30 +329,65 @@ func DownParserService(serviceName string,data []byte ) *grpc_service.Result{
 		c := parser.NewParserClient(conn)
 		ctx1, cancel1:= context.WithTimeout(context.TODO(), time.Second*1)
 		defer cancel1()
-		resp, err :=c.Marshal(ctx1,&parser.DownReq{
-			ID:"uuidXXX", // 本次请求id号
-			Name:serviceName,
-			Payload:data,
-		})
+		resp, err :=c.Marshal(ctx1,data)
 		if err != nil {
 			log.Info("[DownParserService]call Marshal error,",err)
 			return nil
 		}
 		end := time.Now().UnixNano()
 		elapsedTime := time.Duration(end - start)
-		if resp.Err != ""{
-			log.Info("[DownParserService]Marshal return error",resp.Err)
-			return nil
-		}
+
 		return &grpc_service.Result{
-			ID:resp.ID,
 			Elapse:elapsedTime,
-			Payload:resp.Payload,
+			Data:resp,
 		}
 
 	}
 	return nil
 
+}
+
+
+// serviceName 就是帧结构中的 DevName
+func upParserService(serviceID string,serviceName string,data []byte ) *grpc_service.Result{
+
+	if ser , ok := consul.ServiceMap.Load(serviceID); ok {
+
+		log.Debug("serviceName",serviceName )
+		service := ser.(*consulapi.AgentService)
+		log.Debug("service type",service.ID,)
+		// 发起rpc请求,设置超时时间，注意server端也要检查是否超时了
+		ctx, cancel := context.WithTimeout(context.TODO(), time.Second*1)
+		defer cancel()
+		conn, err := grpc.DialContext(ctx,service.Address+":"+ strconv.Itoa(service.Port) , grpc.WithInsecure())
+		if err != nil {
+			log.Warn("network error: ", err)
+			return nil
+		}
+		defer conn.Close()
+		start := time.Now().UnixNano()
+		c := parser.NewParserClient(conn)
+		ctx1, cancel1:= context.WithTimeout(context.TODO(), time.Second*1)
+		defer cancel1()
+		resp, err :=c.UnMarshal(ctx1,&parser.UpReq{
+			ID:"uuidxxx",
+			Name:serviceName,
+			Payload:data,
+		})
+		if err != nil {
+			log.Info("[upParserService]call Marshal error,",err)
+			return nil
+		}
+		end := time.Now().UnixNano()
+		elapsedTime := time.Duration(end - start)
+
+		return &grpc_service.Result{
+			Elapse:elapsedTime,
+			Data:resp,
+		}
+
+	}
+	return nil
 }
 
 func ServiceAll(c *gin.Context){

@@ -15,8 +15,9 @@ service Parser {
 message DownReq {
     string  ID  = 1;
     string name = 2;
-    bytes payload=3;
-    string retain = 4;
+    string kind = 3;
+    string field=4;
+    string val = 5;
 }
 
 //服务端返回给客户端
@@ -37,8 +38,10 @@ message UpReq {
 
 //服务端返回给客户端
 message UpRsp {
-    string ID  = 1;
+    string  ID  = 1;
     string name = 2;
-    bytes payload=3;
-    string err = 4;
+    string kind = 3;
+    string field=4;
+    string val = 5;
+    string err = 6;
 }

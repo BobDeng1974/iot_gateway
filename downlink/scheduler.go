@@ -16,7 +16,7 @@ func deviceQueueSchedulerLoop() {
 	for downPack := range downPack {
 		// send the packet to the gateway
 		if err := gateway.Backend().SendTXPacket(downPack); err != nil {
-			log.Error("send downlink frame error",err)
+			log.Error("send downlink frame error.",err)
 		}
 	}
 }

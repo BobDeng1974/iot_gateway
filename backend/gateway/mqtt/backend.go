@@ -2,21 +2,14 @@ package mqtt
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"github.com/brocaar/lorawan"
 	paho "github.com/eclipse/paho.mqtt.golang"
-	consulapi "github.com/hashicorp/consul/api"
-	"google.golang.org/grpc"
 	"open/backend/gateway"
 	pb "open/backend/proto"
 	"open/config"
-	"open/consul"
 	"open/helpers"
-	"open/lib/grpc_service"
-	"open/lib/grpc_service/parser_proto"
 	"open/marshaler"
-	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -172,7 +165,7 @@ func (b *Backend) SendTXPacket(txPacket pb.DownlinkFrame) error {
 //}
 // 下行命令. devAddr当做GatewayID
 // command 是这里用做命令类型，即up 、 down
-func (b *Backend) publishCommand(fields log.Fields, DevName string, DevId string, command string, msg proto.Message) error {
+func (b *Backend) publishCommand(fields log.Fields, DevType string, DevId string, command string, msg proto.Message) error {
 	//t := b.getGatewayMarshaler(gatewayID) //根据上行的格式
 	bb, err := marshaler.MarshalCommand(marshaler.Protobuf, msg)
 	if err != nil {
@@ -180,10 +173,10 @@ func (b *Backend) publishCommand(fields log.Fields, DevName string, DevId string
 	}
 	//TODO:DevAddr和设备类型应该再做一下区分。这里暂时写死SER_NAME 作为topic
 	templateCtx := struct {
-		DevName   string
+		DevType   string
 		DevId string
 		CommandType string
-	}{DevName, DevId,command}
+	}{DevType, DevId,command}
 	topic := bytes.NewBuffer(nil) //把上面两个参数按照模板格式写入到topic这个buffer中。"gateway/{{ .DevType }}/{{ .DevId }}/command/{{ .CommandType }}"
 	if err := b.commandTopicTemplate.Execute(topic, templateCtx); err != nil {
 		return errors.Wrap(err, "execute command topic template error")
@@ -282,13 +275,13 @@ func (b *Backend)FrameUnpack(frame interface{}){
 			}).WithError(err).Error("gateway/mqtt: unmarshal uplink frame error")
 			return
 		}
-		r := upParserService(MsgInfo.DeviceType,uplinkFrame.DevName,uplinkFrame.PhyPayload)
-		if r == nil {
-			log.Debug("[FrameUnpack]upParserService result is nil")
-			return
-		}
-		log.Debug("respond: ",r.ServiceName,r.Payload)
-		uplinkFrame.PhyPayload = r.Payload
+		//r := upParserService(MsgInfo.DeviceType,uplinkFrame.DevName,uplinkFrame.PhyPayload)
+		//if r == nil {
+		//	log.Debug("[FrameUnpack]upParserService result is nil")
+		//	return
+		//}
+		//log.Debug("respond: ",r.ServiceName,r.Payload)
+		//uplinkFrame.PhyPayload = r.Payload
 		b.sendResult(&uplinkFrame)
 	return
 
@@ -298,51 +291,6 @@ func (b *Backend) sendResult(uplinkFrame *pb.UplinkFrame){
 	b.rxPacketChan <- uplinkFrame //写入接收管道，不会重复的消息。这个管道无缓冲，阻塞
 }
 
-// serviceName 就是帧结构中的 DevName
-func upParserService(serviceID string,serviceName string,data []byte ) *grpc_service.Result{
-
-	if ser , ok := consul.ServiceMap.Load(serviceID); ok {
-
-		log.Debug("serviceName",serviceName )
-		service := ser.(*consulapi.AgentService)
-		log.Debug("service type",service.ID,)
-		// 发起rpc请求,设置超时时间，注意server端也要检查是否超时了
-		ctx, cancel := context.WithTimeout(context.TODO(), time.Second*1)
-		defer cancel()
-		conn, err := grpc.DialContext(ctx,service.Address+":"+ strconv.Itoa(service.Port) , grpc.WithInsecure())
-		if err != nil {
-			log.Warn("network error: ", err)
-			return nil
-		}
-		defer conn.Close()
-		start := time.Now().UnixNano()
-		c := parser.NewParserClient(conn)
-		ctx1, cancel1:= context.WithTimeout(context.TODO(), time.Second*1)
-		defer cancel1()
-		resp, err :=c.UnMarshal(ctx1,&parser.UpReq{
-			ID:"uuidxxx",
-			Name:serviceName,
-			Payload:data,
-		})
-		if err != nil {
-			log.Info("[upParserService]call Marshal error,",err)
-			return nil
-		}
-		end := time.Now().UnixNano()
-		elapsedTime := time.Duration(end - start)
-		if resp.Err != ""{
-			log.Info("[DownParserService]Marshal return error",resp.Err)
-			return nil
-		}
-		return &grpc_service.Result{
-			ID:resp.ID,
-			Elapse:elapsedTime,
-			Payload:resp.Payload,
-		}
-
-	}
-	return nil
-}
 //
 //func (b *Backend) statsPacketHandler(c paho.Client, msg paho.Message) {
 //	b.wg.Add(1)

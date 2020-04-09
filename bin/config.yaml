@@ -15,7 +15,7 @@ mysql:
 mqtt:
   server: tcp://39.100.117.189:1883
   cleanSession: true
-  eventTopic: gateway/+/event/+
+  eventTopic: gateway/+/+/event/+
   commandTopicTemplate: gateway/{{ .DevName }}/{{ .DevId }}/command/{{ .CommandType }}
   qos: 0
   username: ldm
