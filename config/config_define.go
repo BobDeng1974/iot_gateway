@@ -1,8 +1,8 @@
 package config
 // Yaml2Go
-// Mysql
-// Yaml2Go
-// Yaml2Go
+
+var ParserDefault  = "smartLamp"
+
 type Config struct {
 	Mysql   Mysql   `yaml:"mysql"`
 	Mqtt    Mqtt    `yaml:"mqtt"`
@@ -47,6 +47,7 @@ type General struct {
 	HttpPort           int    `yaml:"http_port"`
 	LogLevel           string `yaml:"log_level"`
 }
+
 
 
 

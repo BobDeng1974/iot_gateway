@@ -5,28 +5,23 @@ import (
 	"fmt"
 	"github.com/brocaar/lorawan"
 	paho "github.com/eclipse/paho.mqtt.golang"
-	"open/backend/gateway"
-	pb "open/backend/proto"
-	"open/config"
-	"open/helpers"
-	"open/marshaler"
+	"iot_gateway/backend/gateway"
+	pb "iot_gateway/backend/proto"
+	"iot_gateway/config"
+	"iot_gateway/lib/helpers"
+	"iot_gateway/lib/marshaler"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/panjf2000/ants"
+	"github.com/panjf2000/ants/v2"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
-const deduplicationLockTTL = time.Millisecond * 500
-const (
-	marshalerV2JSON = iota
-	marshalerProtobuf
-	marshalerJSON
-)
+
 type Frame struct {
 	DeviceType string
 	Msg paho.Message
@@ -34,7 +29,6 @@ type Frame struct {
 
 
 
-// Backend implements a MQTT pub-sub backend.
 type Backend struct {
 	sync.RWMutex
 
@@ -42,11 +36,8 @@ type Backend struct {
 	HandlePool              *ants.PoolWithFunc
 
 	rxPacketChan      chan *pb.UplinkFrame //上行有管道，下行不需要管道
-	//statsPacketChan   chan gw.GatewayStats
-	//downlinkTXAckChan chan gw.DownlinkTXAck
 
 	conn                 paho.Client
-	//redisPool            *redis.Pool
 	eventTopic           string
 	commandTopicTemplate *template.Template
 	qos                  uint8
@@ -54,16 +45,12 @@ type Backend struct {
 	gatewayMarshaler map[lorawan.EUI64]marshaler.Type
 }
 
-// NewBackend creates a new Backend.
 func NewBackend( c config.Config) (gateway.Gateway, error) {
 	conf := c.Mqtt
 	var err error
 
 	b := Backend{
 		rxPacketChan:      make(chan *pb.UplinkFrame), // 无缓冲，意味着，并发量高的时候，将无法接收新的帧
-		//statsPacketChan:   make(chan gw.GatewayStats),
-		//downlinkTXAckChan: make(chan gw.DownlinkTXAck),
-		//gatewayMarshaler:  make(map[lorawan.EUI64]marshaler.Type),
 		eventTopic:        conf.EventTopic,
 		qos:               uint8(conf.Qos),
 	}
@@ -79,7 +66,7 @@ func NewBackend( c config.Config) (gateway.Gateway, error) {
 	})
 
 	opts := paho.NewClientOptions()
-	opts.AddBroker(conf.Server) //在root.go中
+	opts.AddBroker(conf.Server)
 	opts.SetUsername(conf.Username)
 	opts.SetPassword(conf.Password)
 	opts.SetCleanSession(conf.CleanSession)
@@ -119,34 +106,15 @@ func (b *Backend) Close() error {
 	b.wg.Wait()
 	b.HandlePool.Release()
 	close(b.rxPacketChan)
-	//close(b.statsPacketChan)
-	//close(b.downlinkTXAckChan)
 	return nil
 }
 
-// RXPacketChan returns the uplink-frame channel.
 // uplink.go 调用这个函数来获取 数据接收管道
 func (b *Backend) RXPacketChan() chan *pb.UplinkFrame {
 	return b.rxPacketChan
 }
 
-// StatsPacketChan returns the gateway stats channel.
-//func (b *Backend) StatsPacketChan() chan gw.GatewayStats {
-//	return b.statsPacketChan
-//}
-
-// DownlinkTXAckChan returns the downlink tx ack channel.
-//func (b *Backend) DownlinkTXAckChan() chan gw.DownlinkTXAck {
-//	return b.downlinkTXAckChan
-//}
-
-// SendTXPacket sends the given downlink-frame to the gateway.
 func (b *Backend) SendTXPacket(txPacket pb.DownlinkFrame) error {
-	//if txPacket.TxInfo == nil {
-	//	return errors.New("tx_info must not be nil")
-	//}
-
-	//gatewayID := helpers.GetGatewayID(txPacket.TxInfo)
 	downID := helpers.GetDownlinkID(&txPacket)
 	//downID是上下文uuid，当初的GatewayID当做，DevAddr
 	log.Debug("[SendTXPacket]downID=",downID)
@@ -157,12 +125,6 @@ func (b *Backend) SendTXPacket(txPacket pb.DownlinkFrame) error {
 	}, txPacket.DevName,txPacket.DevId,"down", &txPacket)
 }
 
-// SendGatewayConfigPacket sends the given GatewayConfigPacket to the gateway.
-//func (b *Backend) SendGatewayConfigPacket(configPacket gw.GatewayConfiguration) error {
-//	gatewayID := helpers.GetGatewayID(&configPacket)
-//
-//	return b.publishCommand(log.Fields{}, gatewayID, "config", &configPacket)
-//}
 // 下行命令. devAddr当做GatewayID
 // command 是这里用做命令类型，即up 、 down
 func (b *Backend) publishCommand(fields log.Fields, DevType string, DevId string, command string, msg proto.Message) error {
@@ -171,7 +133,6 @@ func (b *Backend) publishCommand(fields log.Fields, DevType string, DevId string
 	if err != nil {
 		return errors.Wrap(err, "gateway/mqtt: marshal gateway command error")
 	}
-	//TODO:DevAddr和设备类型应该再做一下区分。这里暂时写死SER_NAME 作为topic
 	templateCtx := struct {
 		DevType   string
 		DevId string
@@ -189,7 +150,6 @@ func (b *Backend) publishCommand(fields log.Fields, DevType string, DevId string
 	fields["proto_body"] = fmt.Sprintf("%02X",bb)
 
 	log.WithFields(fields).Info("gateway/mqtt: publishing gateway command")
-
 	mqttCommandCounter(command).Inc()
 
 	if token := b.conn.Publish(topic.String(), b.qos, false, bb); token.Wait() && token.Error() != nil {
@@ -209,11 +169,9 @@ func (b *Backend) eventHandler(c paho.Client, msg paho.Message) {
 		b.rxPacketHandler(c, msg)
 	} else if strings.HasSuffix(msg.Topic(), "ack") {
 		mqttEventCounter("ack").Inc()
-		//b.ackPacketHandler(c, msg)
 		log.Info("[eventHandler]ldm delete ack Handler")
 	} else if strings.HasSuffix(msg.Topic(), "stats") {
 		mqttEventCounter("stats").Inc()
-		//b.statsPacketHandler(c, msg)
 		log.Info("[eventHandler]ldm delete stats Handler")
 
 	}
@@ -236,36 +194,12 @@ func (b *Backend) rxPacketHandler(c paho.Client, msg paho.Message) {
 	}
 	_=b.HandlePool.Invoke(&frame)
 
-	//var uplinkFrame pb.UplinkFrame
-	//_, err := marshaler.UnmarshalUplinkFrame(msg.Payload(), &uplinkFrame)
-	//if err != nil {
-	//	log.Debugf("mqtt payload hex= %02x,str=%s\n",msg.Payload(),string(msg.Payload()))
-	//	log.WithFields(log.Fields{
-	//	}).WithError(err).Error("gateway/mqtt: unmarshal uplink frame error")
-	//	return
-	//}
-
-	//if uplinkFrame.TxInfo == nil {
-	//	log.WithFields(log.Fields{
-	//		"data_base64": base64.StdEncoding.EncodeToString(msg.Payload()),
-	//	}).Error("gateway/mqtt: tx_info must not be nil")
-	//	return
-	//}
-
-
-	//log.WithFields(log.Fields{
-	//	"uplink_id": uplinkFrame.UplinkId ,
-	//	"DevAddr":uplinkFrame.DevAddr ,
-	//}).Info("gateway/mqtt: uplink frame received")
-	//
-
-	//b.rxPacketChan <- uplinkFrame //写入接收管道，不会重复的消息。这个管道无缓冲，阻塞
 }
 
-
+//协成池处理函数
 func (b *Backend)FrameUnpack(frame interface{}){
 	MsgInfo :=frame.(*Frame)
-	// DeviceType 和 注册服务的id应该一一对应
+	// DeviceType 和 注册的解析器服务名一一对应，一种设备类型对应一套解析器。linux分离思想
 		log.Debug("type=",MsgInfo.DeviceType )
 		var uplinkFrame pb.UplinkFrame
 		_, err := marshaler.UnmarshalUplinkFrame(MsgInfo.Msg.Payload(), &uplinkFrame)
@@ -275,13 +209,7 @@ func (b *Backend)FrameUnpack(frame interface{}){
 			}).WithError(err).Error("gateway/mqtt: unmarshal uplink frame error")
 			return
 		}
-		//r := upParserService(MsgInfo.DeviceType,uplinkFrame.DevName,uplinkFrame.PhyPayload)
-		//if r == nil {
-		//	log.Debug("[FrameUnpack]upParserService result is nil")
-		//	return
-		//}
-		//log.Debug("respond: ",r.ServiceName,r.Payload)
-		//uplinkFrame.PhyPayload = r.Payload
+		// 这里
 		b.sendResult(&uplinkFrame)
 	return
 
@@ -291,85 +219,6 @@ func (b *Backend) sendResult(uplinkFrame *pb.UplinkFrame){
 	b.rxPacketChan <- uplinkFrame //写入接收管道，不会重复的消息。这个管道无缓冲，阻塞
 }
 
-//
-//func (b *Backend) statsPacketHandler(c paho.Client, msg paho.Message) {
-//	b.wg.Add(1)
-//	defer b.wg.Done()
-//
-//	var gatewayStats gw.GatewayStats
-//	t, err := marshaler.UnmarshalGatewayStats(msg.Payload(), &gatewayStats)
-//	if err != nil {
-//		log.WithFields(log.Fields{
-//			"data_base64": base64.StdEncoding.EncodeToString(msg.Payload()),
-//		}).WithError(err).Error("gateway/mqtt: unmarshal gateway stats error")
-//		return
-//	}
-//
-//	gatewayID := helpers.GetGatewayID(&gatewayStats)
-//	statsID := helpers.GetStatsID(&gatewayStats)
-//	b.setGatewayMarshaler(gatewayID, t)
-//
-//	// Since with MQTT all subscribers will receive the stats messages sent
-//	// by all the gateways, the first instance receiving the message must lock it,
-//	// so that other instances can ignore the same message (from the same gw).
-//	// As an unique id, the gw mac is used.
-//	key := fmt.Sprintf("lora:ns:stats:lock:%s", gatewayID)
-//	if locked, err := b.isLocked(key); err != nil || locked {
-//		if err != nil {
-//			log.WithError(err).WithFields(log.Fields{
-//				"key":      key,
-//				"stats_id": statsID,
-//			}).Error("gateway/mqtt: acquire lock error")
-//		}
-//
-//		return
-//	}
-//
-//	log.WithFields(log.Fields{
-//		"gateway_id": gatewayID,
-//		"stats_id":   statsID,
-//	}).Info("gateway/mqtt: gateway stats packet received")
-//	b.statsPacketChan <- gatewayStats
-//}
-//
-//func (b *Backend) ackPacketHandler(c paho.Client, msg paho.Message) {
-//	b.wg.Add(1)
-//	defer b.wg.Done()
-//
-//	var ack gw.DownlinkTXAck
-//	t, err := marshaler.UnmarshalDownlinkTXAck(msg.Payload(), &ack)
-//	if err != nil {
-//		log.WithFields(log.Fields{
-//			"data_base64": base64.StdEncoding.EncodeToString(msg.Payload()),
-//		}).WithError(err).Error("backend/gateway: unmarshal downlink tx ack error")
-//	}
-//
-//	gatewayID := helpers.GetGatewayID(&ack)
-//	downlinkID := helpers.GetDownlinkID(&ack)
-//	b.setGatewayMarshaler(gatewayID, t)
-//
-//	// Since with MQTT all subscribers will receive the ack messages sent
-//	// by all the gateways, the first instance receiving the message must lock it,
-//	// so that other instances can ignore the same message (from the same gw).
-//	// As an unique id, the gw mac is used.
-//	key := fmt.Sprintf("lora:ns:ack:lock:%s", gatewayID)
-//	if locked, err := b.isLocked(key); err != nil || locked {
-//		if err != nil {
-//			log.WithError(err).WithFields(log.Fields{
-//				"key":         key,
-//				"downlink_id": downlinkID,
-//			}).Error("gateway/mqtt: acquire lock error")
-//		}
-//
-//		return
-//	}
-//
-//	log.WithFields(log.Fields{
-//		"gateway_id":  gatewayID,
-//		"downlink_id": downlinkID,
-//	}).Info("backend/gateway: downlink tx acknowledgement received")
-//	b.downlinkTXAckChan <- ack // 传递给下行通道
-//}
 
 func (b *Backend) onConnected(c paho.Client) {
 	log.Info("backend/gateway: connected to mqtt server")

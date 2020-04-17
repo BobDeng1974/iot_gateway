@@ -6,23 +6,38 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"open/backend/gateway"
-	"open/backend/gateway/mqtt"
-	"open/config"
-	"open/consul"
-	"open/downlink"
-	"open/service"
-	"open/uplink"
+	"iot_gateway/backend/gateway"
+	"iot_gateway/backend/gateway/mqtt"
+	"iot_gateway/config"
+	"iot_gateway/consul"
+	"iot_gateway/downlink"
+	"iot_gateway/service"
+	"iot_gateway/uplink"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
+var (
+	h bool
+	parser string
+	)
+//smartLamp 表示用默认的go的解析器，smartLamp_c表示c的解析器
+func init()  {
+	flag.StringVar(&parser, "p", "smartLamp", "set default parser")
+
+}
 func main() {
-	fmt.Println("start")
+	flag.Parse()
+	if h {
+		flag.Usage()
+	}
+	config.ParserDefault = parser
+	fmt.Println("[main]parser is",config.ParserDefault)
 
 	var server = new(uplink.Server)
 	var baiDuSer = new( service.BaiduAPI)
@@ -46,7 +61,7 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	log.WithField("signal", <-sigChan).Info("signal received")
 	go func() {
-		log.Warning("stopping chirpstack-network-server")
+		log.Warning("stopping network-server")
 		if err := server.Stop(); err != nil {
 			log.Fatal(err)
 		}

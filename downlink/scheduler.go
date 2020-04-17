@@ -2,9 +2,9 @@ package downlink
 
 import (
 	"github.com/prometheus/common/log"
-	"open/backend/gateway"
-	pb "open/backend/proto"
-	"open/config"
+	"iot_gateway/backend/gateway"
+	pb "iot_gateway/backend/proto"
+	"iot_gateway/config"
 )
 
 // DeviceQueueSchedulerLoop starts an infinit loop calling the scheduler loop for Class-B

@@ -1,7 +1,7 @@
 package consul
 
 import (
-	"open/config"
+	"iot_gateway/config"
 	consulapi "github.com/hashicorp/consul/api"
 	"sync"
 	log "github.com/sirupsen/logrus"

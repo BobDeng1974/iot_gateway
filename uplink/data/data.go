@@ -6,8 +6,8 @@ import (
 
 	"github.com/patrickmn/go-cache"
 	//log "github.com/sirupsen/logrus"
-	pb "open/backend/proto"
-	"open/config"
+	pb "iot_gateway/backend/proto"
+	"iot_gateway/config"
 	"time"
 )
 var DownlinkTaskCache *cache.Cache // key是token，val是channel

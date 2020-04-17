@@ -16,7 +16,7 @@ mqtt:
   server: tcp://39.100.117.189:1883
   cleanSession: true
   eventTopic: gateway/+/+/event/+
-  commandTopicTemplate: gateway/{{ .DevName }}/{{ .DevId }}/command/{{ .CommandType }}
+  commandTopicTemplate: gateway/{{ .DevType }}/{{ .DevId }}/command/{{ .CommandType }}
   qos: 0
   username: ldm
   password: "123456"
