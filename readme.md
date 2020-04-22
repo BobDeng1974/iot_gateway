@@ -27,7 +27,7 @@ iot产品开发中常见问题：
 
 在linux驱动开发中，有一种抽象的思想是“分层，分离”，使得操作系统能做到支持多种硬件接入，而不需要重新编译系统，有着很好的解耦性。分离使得硬件相关的和非硬件相关的代码分开独立修改和发布。设备链表实现了设备的动态接入和拔出，设备之间通过name动态匹配。分层使得操作系统提供了driver层，即统一接口层，如register、read、write。一款新设备的接入，只需要厂商自己提供device设备和驱动程序driver， 而不需要修改操作系统任何内容即可。
 
-<img src="/Users/lidongmin/Downloads/iot_gw.jpg" alt="iot_gw" style="zoom:50%;" />
+<img src="iot_gw.jpg" alt="iot_gw" style="zoom:50%;" />
 
 
 
