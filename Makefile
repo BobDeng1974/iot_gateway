@@ -1,5 +1,5 @@
 VERSION = v0.0.2
-PROJECT_NAME := open
+PROJECT_NAME := gateway
 OUTPUT_DIR := $(CURDIR)/bin
 BUILDTIME = $(shell date "+%Y%m%d")
 LDFLAGS = -mod=vendor -ldflags "-w -s -X 'main.Version=${VERSION}' -X 'main.Build=${BUILDTIME}'"

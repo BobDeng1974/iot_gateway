@@ -17,7 +17,6 @@ func Setup(conf config.Config) error {
 	if err != nil {
 		log.Fatal("consul client error : ", err)
 	}
-
 	updateAllService := func() {
 		services, err := client.Agent().Services()
 		if err != nil {

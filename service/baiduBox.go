@@ -217,7 +217,6 @@ func controlHandle (c *gin.Context,req *reqBody) {
 	downlink.AddDownlinkFrame(command)
 	ch := make(chan *pb.UplinkFrame,1)
 	data.DownlinkTaskCache.SetDefault(strconv.Itoa(int(command.DownlinkId)),ch)
-	log.Debug("wait up -------------")
 	upFrame := <- ch
 	if upFrame.UplinkId != command.DownlinkId  {
 		log.Error("[controlHandle]UplinkId != DownlinkId",zap.Uint32("DownlinkId",command.DownlinkId),
@@ -403,7 +402,6 @@ func (ser *BaiduAPI)Stop(){
 	defer cancel()
 	if err := ser.server.Shutdown(ctx); err != nil {
 		log.Fatal("Server Shutdown:" + err.Error())
-		//logger.GetLogger().Fatal("Server Shutdown:" + err.Error())
 	}
 	log.Debug("Server exiting")
 
